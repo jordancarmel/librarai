@@ -289,12 +289,13 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         const zoomFeature = caps?.zoomFeature?.();
         if (zoomFeature?.isSupported?.()) {
           const min = Number(zoomFeature.min?.() ?? 1);
-          const max = Number(zoomFeature.max?.() ?? 1);
+          const reportedMax = Number(zoomFeature.max?.() ?? 1);
+          // Cap the slider at ~3× so users can't crank digital zoom to a point
+          // where each barcode bar shrinks below the decoder's pixel threshold.
+          const max = Math.min(reportedMax, 3);
           const step = Number(zoomFeature.step?.() || 0.1);
           const current = Number(zoomFeature.value?.() ?? min);
           if (max > min) setZoom({ min, max, step: step || 0.1, current: min });
-          // Force zoom back to 1× — digital zoom hurts barcode decode by reducing
-          // the effective pixel count of the barcode sent to the decoder.
           if (current > min) {
             try { zoomFeature.apply(min); } catch { /* ignore */ }
           }
@@ -423,27 +424,36 @@ export function Scanner({ lang, onBook }: ScannerProps) {
   const handleManualSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      const isbn = cleanIsbn(manualIsbn);
-      if (!isValidIsbn(isbn)) {
-        setState({ kind: 'error', message: t(lang, 'scan.error.invalid') });
+      const raw = cleanIsbn(manualIsbn);
+      if (!raw) return;
+      if (isValidIsbn(raw)) {
+        setState({ kind: 'looking-up', payload: raw });
+        try {
+          const book = await lookupByIsbn(raw);
+          onBook(book);
+          setState({ kind: 'success', book });
+          setManualIsbn('');
+        } catch (e) {
+          const err = e as BookLookupError;
+          if (err.code === 'not-found') {
+            openSearch(raw);
+            return;
+          }
+          setState({ kind: 'error', message: err.message });
+        }
         return;
       }
-      setState({ kind: 'looking-up', payload: isbn });
-      try {
-        const book = await lookupByIsbn(isbn);
-        onBook(book);
-        setState({ kind: 'success', book });
+      // Not a real ISBN — but still a numeric barcode. Route it through the same
+      // pipeline as a scanned code: barcode cache → Worker → search fallback.
+      if (/^\d{6,14}$/.test(raw)) {
+        handledPayloadRef.current = null;
+        await handlePayload(raw);
         setManualIsbn('');
-      } catch (e) {
-        const err = e as BookLookupError;
-        if (err.code === 'not-found') {
-          openSearch(isbn);
-          return;
-        }
-        setState({ kind: 'error', message: err.message });
+        return;
       }
+      setState({ kind: 'error', message: t(lang, 'scan.error.invalid') });
     },
-    [lang, manualIsbn, onBook, openSearch],
+    [handlePayload, lang, manualIsbn, onBook, openSearch],
   );
 
   const reset = useCallback(() => {
