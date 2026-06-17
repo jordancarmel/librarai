@@ -10,6 +10,9 @@ export interface AppSettings {
   // Israeli ISBNs since its Hebrew metadata is richer than Google Books. Free signup
   // at https://api2.nli.org.il/signup/.
   nliApiKey?: string;
+  // Optional Cloudflare Worker URL that resolves non-ISBN publisher SKUs via
+  // web-search-and-scrape. See worker/README.md for setup.
+  lookupWorkerUrl?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {

@@ -305,6 +305,57 @@ export async function lookupByIsbn(isbn: string, signal?: AbortSignal): Promise<
   throw new BookLookupError('Book not found', 'not-found');
 }
 
+interface WorkerHit {
+  title?: string;
+  authors?: string[];
+  publisher?: string;
+  source?: string;
+  sourceUrl?: string;
+  thumbnail?: string;
+}
+
+async function fetchFromWorker(barcode: string, signal?: AbortSignal): Promise<Book | null> {
+  const workerUrl = loadSettings().lookupWorkerUrl?.trim();
+  if (!workerUrl) return null;
+  const base = workerUrl.replace(/\/+$/, '');
+  if (!/^\d{6,14}$/.test(barcode)) return null;
+  try {
+    const res = await fetch(`${base}/lookup?barcode=${encodeURIComponent(barcode)}`, { signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as WorkerHit;
+    if (!data.title) return null;
+    // Enrich the rough title/author with Google Books for clean metadata + cover art.
+    const author = data.authors?.[0];
+    const enrichQuery = author
+      ? `intitle:"${data.title}" inauthor:"${author}"`
+      : `intitle:"${data.title}"`;
+    try {
+      const enriched = await fetchGoogleByQuery(enrichQuery, { lang: 'he', signal });
+      if (enriched.length) return { ...enriched[0], source: 'qr' };
+    } catch {
+      // Google Books failed — fall through to a stub built from worker data.
+    }
+    // No Google Books match; assemble a minimal Book from what the worker found.
+    return {
+      id: `worker-${barcode}`,
+      title: data.title,
+      authors: data.authors ?? [],
+      publisher: data.publisher,
+      categories: [],
+      language: 'he',
+      thumbnail: data.thumbnail,
+      isHebrew: containsHebrew(data.title),
+      isIsraeliPublisher: true,
+      addedAt: new Date().toISOString(),
+      status: 'to-read',
+      source: 'qr',
+    };
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    return null;
+  }
+}
+
 /**
  * Resolve any raw scanner payload (QR or barcode) into a Book.
  */
@@ -325,6 +376,10 @@ export async function lookupFromScan(payload: string, signal?: AbortSignal): Pro
   } catch {
     // not a URL
   }
+  // Non-ISBN numeric barcodes (Israeli publisher SKUs and similar) → try the
+  // user's Cloudflare Worker if configured.
+  const fromWorker = await fetchFromWorker(payload, signal);
+  if (fromWorker) return fromWorker;
   // Last resort: search Google Books with the raw payload (e.g. QR contains book title)
   const results = await fetchGoogleByQuery(payload, { signal });
   if (results.length) return { ...results[0], source: 'qr' };

@@ -55,6 +55,10 @@ const en: Dict = {
   'settings.nli.placeholder': 'Paste API key',
   'settings.save': 'Save',
   'settings.saved': 'Saved',
+  'settings.worker.label': 'Lookup Worker URL',
+  'settings.worker.hint':
+    'Resolves Israeli publisher SKUs (non-ISBN barcodes) by web-searching. Deploy the Worker once — see worker/README.md.',
+  'settings.worker.placeholder': 'https://librarai-lookup.xxx.workers.dev',
   'book.author': 'by',
   'book.status.toRead': 'To read',
   'book.status.reading': 'Reading',
@@ -144,6 +148,10 @@ const he: Dict = {
   'settings.nli.placeholder': 'הדבק כאן את המפתח',
   'settings.save': 'שמור',
   'settings.saved': 'נשמר',
+  'settings.worker.label': 'כתובת Worker לחיפוש',
+  'settings.worker.hint':
+    'מזהה ברקודים פנימיים של הוצאות (לא מסת"ב) באמצעות חיפוש ברשת. דורש פריסה חד-פעמית — ראה worker/README.md.',
+  'settings.worker.placeholder': 'https://librarai-lookup.xxx.workers.dev',
   'book.author': 'מאת',
   'book.status.toRead': 'ממתין',
   'book.status.reading': 'קוראים',

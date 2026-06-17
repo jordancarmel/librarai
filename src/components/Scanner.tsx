@@ -783,14 +783,20 @@ function SearchFallback({
 function SettingsPanel({ lang }: { lang: Lang }) {
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState(() => loadSettings().nliApiKey ?? '');
+  const [workerUrl, setWorkerUrl] = useState(() => loadSettings().lookupWorkerUrl ?? '');
   const [savedAt, setSavedAt] = useState(0);
 
   const save = () => {
-    const trimmed = key.trim();
     const s = loadSettings();
-    saveSettings({ ...s, nliApiKey: trimmed || undefined });
+    saveSettings({
+      ...s,
+      nliApiKey: key.trim() || undefined,
+      lookupWorkerUrl: workerUrl.trim() || undefined,
+    });
     setSavedAt(Date.now());
   };
+
+  const justSaved = savedAt && Date.now() - savedAt < 2000;
 
   return (
     <div className="card">
@@ -805,37 +811,55 @@ function SettingsPanel({ lang }: { lang: Lang }) {
         <span className="text-xs text-slate-500">{open ? '−' : '+'}</span>
       </button>
       {open && (
-        <div className="mt-3 flex flex-col gap-2">
-          <label className="text-xs font-medium text-slate-300">
-            {t(lang, 'settings.nli.label')}
-          </label>
-          <p className="text-[11px] leading-relaxed text-slate-500">
-            {t(lang, 'settings.nli.hint')}{' '}
-            <a
-              href="https://api2.nli.org.il/signup/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent-300 underline-offset-2 hover:underline"
-            >
-              {t(lang, 'settings.nli.signup')} <ExternalLink className="inline h-3 w-3" />
-            </a>
-          </p>
-          <div className="flex gap-2">
+        <div className="mt-4 flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-medium text-slate-300">
+              {t(lang, 'settings.worker.label')}
+            </label>
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              {t(lang, 'settings.worker.hint')}
+            </p>
+            <input
+              type="url"
+              value={workerUrl}
+              onChange={(e) => setWorkerUrl(e.target.value)}
+              placeholder={t(lang, 'settings.worker.placeholder')}
+              className="rounded-2xl bg-white/5 px-3 py-2 text-sm text-white ring-1 ring-inset ring-white/10 placeholder:text-slate-500 focus:outline-none focus:ring-accent-500"
+              dir="ltr"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-medium text-slate-300">
+              {t(lang, 'settings.nli.label')}
+            </label>
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              {t(lang, 'settings.nli.hint')}{' '}
+              <a
+                href="https://api2.nli.org.il/signup/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent-300 underline-offset-2 hover:underline"
+              >
+                {t(lang, 'settings.nli.signup')} <ExternalLink className="inline h-3 w-3" />
+              </a>
+            </p>
             <input
               type="password"
               value={key}
               onChange={(e) => setKey(e.target.value)}
               placeholder={t(lang, 'settings.nli.placeholder')}
-              className="flex-1 rounded-2xl bg-white/5 px-3 py-2 text-sm text-white ring-1 ring-inset ring-white/10 placeholder:text-slate-500 focus:outline-none focus:ring-accent-500"
+              className="rounded-2xl bg-white/5 px-3 py-2 text-sm text-white ring-1 ring-inset ring-white/10 placeholder:text-slate-500 focus:outline-none focus:ring-accent-500"
               dir="ltr"
               autoComplete="off"
             />
-            <button onClick={save} className="btn-primary px-4 text-xs">
-              {savedAt && Date.now() - savedAt < 2000
-                ? t(lang, 'settings.saved')
-                : t(lang, 'settings.save')}
-            </button>
           </div>
+
+          <button onClick={save} className="btn-primary self-end px-4 text-xs">
+            {justSaved ? t(lang, 'settings.saved') : t(lang, 'settings.save')}
+          </button>
         </div>
       )}
     </div>

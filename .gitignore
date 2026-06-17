@@ -4,6 +4,10 @@ dist-ssr
 *.local
 *.tsbuildinfo
 
+# Cloudflare Worker (worker/)
+.wrangler
+worker/.dev.vars
+
 # Editor / OS
 .vscode/*
 !.vscode/extensions.json
