@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+    background: radial-gradient(ellipse at top, #1e1b4b 0%, #0a0f1d 60%);
+    background-attachment: fixed;
+  }
+
+  /* Allow RTL to flip the document */
+  html[dir='rtl'] {
+    direction: rtl;
+  }
+
+  /* Safe-area aware sticky regions */
+  .safe-bottom {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0) + 0.5rem);
+  }
+  .safe-top {
+    padding-top: calc(env(safe-area-inset-top, 0) + 0.5rem);
+  }
+}
+
+@layer components {
+  .glass {
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full bg-white/5 px-2.5 py-1 text-xs font-medium text-slate-300 ring-1 ring-inset ring-white/10;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-br from-accent-500 to-indigo-600 px-5 py-3 font-semibold text-white shadow-lg shadow-indigo-900/40 transition active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl bg-white/5 px-4 py-2.5 font-medium text-slate-200 ring-1 ring-inset ring-white/10 transition active:scale-[0.98];
+  }
+
+  .card {
+    @apply rounded-3xl glass p-5 shadow-2xl shadow-black/40;
+  }
+
+  /* Hide native html5-qrcode scaffolding we don't want */
+  #qr-reader__dashboard_section_csr {
+    display: none !important;
+  }
+  #qr-reader__header_message,
+  #qr-reader__status_span {
+    color: #cbd5e1 !important;
+    font-family: inherit !important;
+  }
+  #qr-reader video {
+    border-radius: 1.25rem !important;
+    object-fit: cover !important;
+  }
+}
+
+/* Hebrew font preference when the doc is RTL */
+html[dir='rtl'] body {
+  font-family: 'Heebo', 'Noto Sans Hebrew', system-ui, sans-serif;
+}
