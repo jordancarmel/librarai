@@ -32,6 +32,9 @@ const en: Dict = {
   'scan.error.camera': 'Camera access denied. Enable camera permission and try again.',
   'scan.error.https': 'Camera requires HTTPS or localhost. Open the deployed URL on your phone.',
   'scan.tip': 'Tip: most books have an ISBN-13 barcode on the back cover.',
+  'scan.hint.tapFocus': 'Tap to focus',
+  'scan.hint.distance': 'Hold ~15 cm away · tap the barcode to refocus',
+  'scan.torch': 'Torch',
   'scan.fallback.title': "Couldn't recognize this barcode",
   'scan.fallback.hint':
     'Israeli books often have a non-ISBN publisher code on the back. Search by title or author instead:',
@@ -125,6 +128,9 @@ const he: Dict = {
   'scan.error.camera': 'הגישה למצלמה נדחתה. אפשר הרשאת מצלמה ונסה שוב.',
   'scan.error.https': 'המצלמה דורשת HTTPS או localhost. פתח את הכתובת המאובטחת בטלפון.',
   'scan.tip': 'טיפ: לרוב הספרים יש ברקוד מסת"ב על הכריכה האחורית.',
+  'scan.hint.tapFocus': 'הקש לפוקוס',
+  'scan.hint.distance': 'החזק במרחק ~15 ס"מ · הקש על הברקוד למיקוד מחדש',
+  'scan.torch': 'פנס',
   'scan.fallback.title': 'הברקוד לא זוהה',
   'scan.fallback.hint':
     'לספרים בעברית יש לעיתים ברקוד פנימי של ההוצאה במקום מסת"ב. חפש לפי שם הספר או הסופר:',

@@ -16,6 +16,8 @@ import {
   Settings as SettingsIcon,
   Sparkles,
   ExternalLink,
+  Flashlight,
+  Focus,
 } from 'lucide-react';
 import type { Book } from '../types';
 import { BookCover } from './BookCover';
@@ -47,6 +49,12 @@ interface ZoomCap {
   current: number;
 }
 
+interface FocusReticle {
+  x: number; // 0..1 within video
+  y: number; // 0..1 within video
+  ts: number;
+}
+
 const SCANNER_ID = 'qr-reader';
 const COVER_VIDEO_ID = 'cover-camera';
 
@@ -57,6 +65,8 @@ export function Scanner({ lang, onBook }: ScannerProps) {
   const [searchResults, setSearchResults] = useState<Book[]>([]);
   const [searching, setSearching] = useState(false);
   const [zoom, setZoom] = useState<ZoomCap | null>(null);
+  const [torch, setTorch] = useState<{ supported: boolean; on: boolean } | null>(null);
+  const [reticle, setReticle] = useState<FocusReticle | null>(null);
 
   // The barcode payload that should be cached when the user picks a search result,
   // so a subsequent scan of the same publisher SKU auto-resolves.
@@ -72,6 +82,8 @@ export function Scanner({ lang, onBook }: ScannerProps) {
   const stopCamera = useCallback(async () => {
     const s = scannerRef.current;
     setZoom(null);
+    setTorch(null);
+    setReticle(null);
     if (!s) return;
     try {
       if (s.getState() === Html5QrcodeScannerState.SCANNING) {
@@ -153,6 +165,65 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     }
   }, []);
 
+  const toggleTorch = useCallback(() => {
+    const s = scannerRef.current;
+    if (!s) return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const caps = (s as any).getRunningTrackCameraCapabilities?.();
+      const torchFeature = caps?.torchFeature?.();
+      if (torchFeature?.isSupported?.()) {
+        const next = !(torch?.on ?? false);
+        torchFeature.apply(next);
+        setTorch({ supported: true, on: next });
+      }
+    } catch {
+      // ignore
+    }
+  }, [torch]);
+
+  const focusAt = useCallback((nx: number, ny: number) => {
+    const s = scannerRef.current;
+    if (!s) return;
+    setReticle({ x: nx, y: ny, ts: Date.now() });
+    // Try a manual single-shot focus at the tapped point, then revert to continuous.
+    // Many Android browsers honour pointsOfInterest; iOS Safari ignores it but
+    // a focusMode round-trip alone is sometimes enough to nudge AF.
+    const advanced: MediaTrackConstraintSet[] = [
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pointsOfInterest: [{ x: nx, y: ny }] } as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { focusMode: 'single-shot' } as any,
+    ];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (s as any).applyVideoConstraints?.({ advanced }).catch(() => undefined);
+    window.setTimeout(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (scannerRef.current as any)?.applyVideoConstraints?.({
+        advanced: [{ focusMode: 'continuous' }],
+      }).catch(() => undefined);
+    }, 900);
+  }, []);
+
+  const onScannerTap = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const container = e.currentTarget;
+      const video = container.querySelector('video');
+      const rect = (video ?? container).getBoundingClientRect();
+      const nx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const ny = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      focusAt(nx, ny);
+    },
+    [focusAt],
+  );
+
+  // Hide the focus reticle after 800ms
+  useEffect(() => {
+    if (!reticle) return;
+    const id = window.setTimeout(() => setReticle(null), 800);
+    return () => window.clearTimeout(id);
+  }, [reticle]);
+
   const startCamera = useCallback(async () => {
     handledPayloadRef.current = null;
     setState({ kind: 'scanning' });
@@ -221,10 +292,19 @@ export function Scanner({ lang, onBook }: ScannerProps) {
           const max = Number(zoomFeature.max?.() ?? 1);
           const step = Number(zoomFeature.step?.() || 0.1);
           const current = Number(zoomFeature.value?.() ?? min);
-          if (max > min) setZoom({ min, max, step: step || 0.1, current });
+          if (max > min) setZoom({ min, max, step: step || 0.1, current: min });
+          // Force zoom back to 1× — digital zoom hurts barcode decode by reducing
+          // the effective pixel count of the barcode sent to the decoder.
+          if (current > min) {
+            try { zoomFeature.apply(min); } catch { /* ignore */ }
+          }
+        }
+        const torchFeature = caps?.torchFeature?.();
+        if (torchFeature?.isSupported?.()) {
+          setTorch({ supported: true, on: false });
         }
       } catch {
-        // unsupported — no zoom UI
+        // unsupported — no zoom/torch UI
       }
     } catch (e) {
       setState({ kind: 'error', message: formatCameraError(e, lang) });
@@ -444,19 +524,52 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         <>
           <div className="card relative overflow-hidden">
             <div
-              id={SCANNER_ID}
-              className="aspect-[4/3] w-full overflow-hidden rounded-2xl bg-black/60"
-            />
-            {state.kind === 'scanning' && (
-              <>
-                <div className="pointer-events-none absolute inset-5 flex items-center justify-center">
-                  <div className="relative h-40 w-[85%] rounded-2xl border-2 border-accent-400/70 shadow-[0_0_0_4000px_rgba(0,0,0,0.35)]">
-                    <div className="absolute inset-x-0 top-0 h-0.5 animate-scan-line bg-accent-400 shadow-[0_0_20px_2px_rgba(167,139,250,0.9)]" />
-                    <div className="absolute -top-7 left-1/2 -translate-x-1/2 rounded-full bg-accent-500/90 px-3 py-1 text-xs font-semibold text-white shadow-lg">
-                      <ScanLine className="me-1 inline h-3.5 w-3.5" /> Aim at barcode
+              className="relative"
+              onPointerDown={state.kind === 'scanning' ? onScannerTap : undefined}
+            >
+              <div
+                id={SCANNER_ID}
+                className="aspect-[4/3] w-full overflow-hidden rounded-2xl bg-black/60"
+              />
+              {state.kind === 'scanning' && (
+                <>
+                  <div className="pointer-events-none absolute inset-5 flex items-center justify-center">
+                    <div className="relative h-40 w-[85%] rounded-2xl border-2 border-accent-400/70 shadow-[0_0_0_4000px_rgba(0,0,0,0.35)]">
+                      <div className="absolute inset-x-0 top-0 h-0.5 animate-scan-line bg-accent-400 shadow-[0_0_20px_2px_rgba(167,139,250,0.9)]" />
+                      <div className="absolute -top-9 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-accent-500/90 px-3 py-1 text-[11px] font-semibold text-white shadow-lg">
+                        <ScanLine className="me-1 inline h-3.5 w-3.5" />
+                        {t(lang, 'scan.hint.tapFocus')}
+                      </div>
                     </div>
                   </div>
-                </div>
+                  {reticle && (
+                    <div
+                      className="pointer-events-none absolute h-20 w-20 -translate-x-1/2 -translate-y-1/2"
+                      style={{ left: `${reticle.x * 100}%`, top: `${reticle.y * 100}%` }}
+                    >
+                      <div className="h-full w-full animate-ping rounded-full border-2 border-accent-300" />
+                      <div className="absolute inset-3 rounded-full border border-accent-200/80" />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {state.kind === 'scanning' && (
+              <>
+                {torch?.supported && (
+                  <button
+                    type="button"
+                    onClick={toggleTorch}
+                    className={`absolute right-3 top-3 grid h-10 w-10 place-items-center rounded-full backdrop-blur transition active:scale-95 ${
+                      torch.on
+                        ? 'bg-amber-300 text-amber-900 shadow-lg shadow-amber-500/50'
+                        : 'bg-black/55 text-white/90'
+                    }`}
+                    aria-label={t(lang, 'scan.torch')}
+                  >
+                    <Flashlight className="h-5 w-5" />
+                  </button>
+                )}
                 {zoom && (
                   <div className="absolute inset-x-5 bottom-3 flex items-center gap-3 rounded-full bg-black/55 px-3 py-2 backdrop-blur">
                     <ZoomIn className="h-4 w-4 text-white/90" />
@@ -479,6 +592,10 @@ export function Scanner({ lang, onBook }: ScannerProps) {
                     </span>
                   </div>
                 )}
+                <div className="mt-2 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
+                  <Focus className="h-3 w-3" />
+                  <span>{t(lang, 'scan.hint.distance')}</span>
+                </div>
               </>
             )}
             {state.kind === 'idle' && (
