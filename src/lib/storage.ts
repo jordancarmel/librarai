@@ -18,6 +18,7 @@ export interface AppSettings {
 const DEFAULT_SETTINGS: AppSettings = {
   language: 'en',
   hasSeenOnboarding: false,
+  lookupWorkerUrl: 'https://librarai-lookup.jordan-avi-carmel-cloudflare.workers.dev',
 };
 
 export function loadLibrary(): Book[] {

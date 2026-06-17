@@ -91,13 +91,26 @@ async function handleLookup(barcode: string): Promise<Response> {
     // best-effort; SERP title is the floor
   }
 
+  const authors = dedupe([
+    ...(fromPage.authors ?? []),
+    ...(fromSerpTitle.authors ?? []),
+  ]);
+
+  let title = pickBest(fromPage.title, fromSerpTitle.title);
+  // OpenGraph titles on Israeli bookstores often append " - <Author>" to the
+  // title field. Strip it when we already know the author independently.
+  title = stripAuthorSuffix(title, authors);
+
+  // Strip obvious garbage publisher captures (single-character or numeric matches).
+  const publisher =
+    fromPage.publisher && fromPage.publisher.replace(/\s+/g, '').length >= 2
+      ? fromPage.publisher
+      : undefined;
+
   const merged: BookData = {
-    title: pickBest(fromPage.title, fromSerpTitle.title),
-    authors: dedupe([
-      ...(fromPage.authors ?? []),
-      ...(fromSerpTitle.authors ?? []),
-    ]),
-    publisher: fromPage.publisher,
+    title,
+    authors,
+    publisher,
     thumbnail: fromPage.thumbnail,
     source: hostnameOf(storeResult.url),
     sourceUrl: storeResult.url,
@@ -340,6 +353,28 @@ function parseFromSerpTitle(raw: string): { title: string; authors: string[] } {
 function pickBest<T extends string | undefined>(a: T, b: T): T {
   if (a && b) return (a.length >= b.length ? a : b) as T;
   return (a || b) as T;
+}
+
+function stripAuthorSuffix(title: string | undefined, authors: string[]): string | undefined {
+  if (!title || authors.length === 0) return title;
+  let out = title;
+  for (const author of authors) {
+    const a = author.trim();
+    if (!a) continue;
+    for (const sep of [' - ', ' – ', ' — ', ' | ', ', ', ' / ']) {
+      const suffix = sep + a;
+      if (out.endsWith(suffix)) {
+        out = out.slice(0, -suffix.length).trim();
+        return out;
+      }
+      const prefix = a + sep;
+      if (out.startsWith(prefix)) {
+        out = out.slice(prefix.length).trim();
+        return out;
+      }
+    }
+  }
+  return out;
 }
 
 function dedupe(arr: string[]): string[] {
