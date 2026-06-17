@@ -177,11 +177,12 @@ export function Scanner({ lang, onBook }: ScannerProps) {
       });
       scannerRef.current = instance;
 
-      const cameraConfig = {
-        facingMode: { ideal: 'environment' },
-        advanced: [{ focusMode: 'continuous' }],
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any;
+      // Keep the initial constraint minimal — html5-qrcode 2.3.8 sometimes
+      // surfaces unsupported `advanced` constraints (focusMode, etc.) as a
+      // generic "permission denied" even when permission is fine. The focus-mode
+      // hint is applied below via applyVideoConstraints once the track is live,
+      // which is the path the spec actually treats as best-effort.
+      const cameraConfig = { facingMode: 'environment' };
 
       await instance.start(
         cameraConfig,
@@ -226,11 +227,7 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         // unsupported — no zoom UI
       }
     } catch (e) {
-      const err = e as Error;
-      const msg = /permission|denied|NotAllowed/i.test(err.message)
-        ? t(lang, 'scan.error.camera')
-        : err.message || t(lang, 'scan.error.camera');
-      setState({ kind: 'error', message: msg });
+      setState({ kind: 'error', message: formatCameraError(e, lang) });
     }
   }, [handlePayload, lang]);
 
@@ -263,11 +260,7 @@ export function Scanner({ lang, onBook }: ScannerProps) {
       };
       attempt();
     } catch (e) {
-      const err = e as Error;
-      const msg = /permission|denied|NotAllowed/i.test(err.message)
-        ? t(lang, 'scan.error.camera')
-        : err.message || t(lang, 'scan.error.camera');
-      setState({ kind: 'error', message: msg });
+      setState({ kind: 'error', message: formatCameraError(e, lang) });
     }
   }, [lang]);
 
@@ -596,6 +589,32 @@ export function Scanner({ lang, onBook }: ScannerProps) {
       )}
     </div>
   );
+}
+
+function formatCameraError(e: unknown, lang: Lang): string {
+  // html5-qrcode can throw plain strings, `Error` instances, or DOMException-like
+  // objects. Normalise so we can distinguish a real permission denial from a
+  // constraint failure (which has different remedies).
+  const message =
+    typeof e === 'string'
+      ? e
+      : e && typeof e === 'object'
+        ? ((e as { message?: string; name?: string }).message ?? '') ||
+          (e as { name?: string }).name ||
+          ''
+        : '';
+  const name = e && typeof e === 'object' ? (e as { name?: string }).name ?? '' : '';
+  const haystack = `${name} ${message}`;
+  // True permission denials — only NotAllowedError / SecurityError are reliably
+  // about user permission. Vague "denied" strings from library wrappers don't
+  // count, so we expose them instead of pretending it's permission.
+  if (/NotAllowed|SecurityError|PermissionDenied/i.test(haystack)) {
+    return t(lang, 'scan.error.camera');
+  }
+  if (/Overconstrained|NotReadable|NotFound|TrackStart/i.test(haystack)) {
+    return `${t(lang, 'scan.error.camera')} (${name || message})`;
+  }
+  return message || t(lang, 'scan.error.camera');
 }
 
 function mergeResults(a: Book[], b: Book[]): Book[] {
