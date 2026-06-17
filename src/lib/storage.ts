@@ -6,6 +6,10 @@ const SETTINGS_KEY = 'librarai.settings.v1';
 export interface AppSettings {
   language: 'en' | 'he';
   hasSeenOnboarding: boolean;
+  // Optional National Library of Israel API key. When set, NLI is queried first for
+  // Israeli ISBNs since its Hebrew metadata is richer than Google Books. Free signup
+  // at https://api2.nli.org.il/signup/.
+  nliApiKey?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {

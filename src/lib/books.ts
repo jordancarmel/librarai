@@ -1,8 +1,10 @@
 import type { Book } from '../types';
 import { cleanIsbn, containsHebrew, extractIsbn, isIsraeliIsbn, isValidIsbn } from './isbn';
+import { loadSettings } from './storage';
 
 const GOOGLE = 'https://www.googleapis.com/books/v1/volumes';
 const OPEN_LIBRARY = 'https://openlibrary.org';
+const NLI = 'https://api.nli.org.il/openlibrary/search';
 
 interface GoogleVolume {
   id: string;
@@ -164,14 +166,129 @@ async function fetchOpenLibraryByIsbn(isbn: string, signal?: AbortSignal): Promi
   };
 }
 
+interface NliRecord {
+  // The NLI Open Library API returns MARC-flavoured records. Field names vary by
+  // endpoint version; we try several common keys so the parser survives upstream tweaks.
+  title?: string | string[];
+  creator?: string | string[];
+  author?: string | string[];
+  publisher?: string | string[];
+  date?: string | string[];
+  language?: string | string[];
+  isbn?: string | string[];
+  thumbnail?: string;
+  '@title'?: string;
+  '@creator'?: string;
+  [key: string]: unknown;
+}
+
+function pickFirst(v: unknown): string | undefined {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v) && v.length) return typeof v[0] === 'string' ? v[0] : undefined;
+  return undefined;
+}
+
+function pickAll(v: unknown): string[] {
+  if (typeof v === 'string') return [v];
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string');
+  return [];
+}
+
+function nliRecordToBook(rec: NliRecord, fallbackIsbn: string): Book | null {
+  const title =
+    pickFirst(rec.title) ?? pickFirst(rec['@title']) ?? pickFirst((rec as Record<string, unknown>).Title);
+  if (!title) return null;
+  const authors = pickAll(rec.creator).concat(pickAll(rec.author));
+  const publisher = pickFirst(rec.publisher);
+  const date = pickFirst(rec.date);
+  const lang = pickFirst(rec.language);
+  const isbn13 = pickAll(rec.isbn).find((s) => /^\d{13}$/.test(s)) ?? (fallbackIsbn.length === 13 ? fallbackIsbn : undefined);
+  const isbn10 = pickAll(rec.isbn).find((s) => /^\d{9}[\dX]$/i.test(s)) ?? (fallbackIsbn.length === 10 ? fallbackIsbn : undefined);
+  const hebrew = lang === 'heb' || lang === 'he' || containsHebrew(title) || authors.some((a) => containsHebrew(a));
+  const israeli = (isbn13 && isIsraeliIsbn(isbn13)) || (isbn10 && isIsraeliIsbn(isbn10)) || hebrew;
+
+  return {
+    id: isbn13 || isbn10 || `nli-${fallbackIsbn}`,
+    isbn13,
+    isbn10,
+    title,
+    authors,
+    publisher,
+    publishedDate: date,
+    publishedYear: yearFromDate(date),
+    categories: [],
+    language: hebrew ? 'he' : lang ?? 'en',
+    thumbnail: rec.thumbnail,
+    isHebrew: !!hebrew,
+    isIsraeliPublisher: !!israeli,
+    addedAt: new Date().toISOString(),
+    status: 'to-read',
+    source: 'isbn',
+  };
+}
+
+async function fetchNliByIsbn(isbn: string, signal?: AbortSignal): Promise<Book | null> {
+  const apiKey = loadSettings().nliApiKey?.trim();
+  if (!apiKey) return null;
+  try {
+    const params = new URLSearchParams({
+      api_key: apiKey,
+      query: `any,contains,${isbn}`,
+      output_format: 'json',
+      material_type: 'books',
+    });
+    const res = await fetch(`${NLI}?${params.toString()}`, { signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as unknown;
+    // Best-effort: the JSON envelope shape isn't tightly documented. Walk likely
+    // arrays and try to parse the first record that contains a title.
+    const recordArrays = collectRecordArrays(data);
+    for (const arr of recordArrays) {
+      for (const rec of arr) {
+        const book = nliRecordToBook(rec, isbn);
+        if (book) return book;
+      }
+    }
+    return null;
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    return null;
+  }
+}
+
+function collectRecordArrays(data: unknown): NliRecord[][] {
+  const out: NliRecord[][] = [];
+  const visit = (node: unknown) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      if (node.length && typeof node[0] === 'object' && node[0]) {
+        out.push(node as NliRecord[]);
+      }
+      for (const child of node) visit(child);
+    } else if (typeof node === 'object') {
+      for (const v of Object.values(node as Record<string, unknown>)) visit(v);
+    }
+  };
+  visit(data);
+  return out;
+}
+
 /**
- * Look up a book by ISBN. Tries Google Books first (best Hebrew metadata), falls back
- * to Open Library, and finally returns a sparse Book stub if nothing else works so
- * users can still add the book and edit the details themselves.
+ * Look up a book by ISBN. For Israeli ISBNs with an NLI key configured, NLI is tried
+ * first (best Hebrew metadata). Otherwise Google Books, then Open Library, with a
+ * not-found at the end so the caller can show a search fallback.
  */
 export async function lookupByIsbn(isbn: string, signal?: AbortSignal): Promise<Book> {
   const clean = cleanIsbn(isbn);
   if (!isValidIsbn(clean)) throw new BookLookupError('Invalid ISBN', 'invalid');
+  if (isIsraeliIsbn(clean)) {
+    try {
+      const n = await fetchNliByIsbn(clean, signal);
+      if (n) return n;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+    }
+  }
   try {
     const g = await fetchGoogleByIsbn(clean, signal);
     if (g) return g;

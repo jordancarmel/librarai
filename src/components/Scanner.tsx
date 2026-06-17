@@ -12,11 +12,17 @@ import {
   Search,
   Plus,
   ZoomIn,
+  Image as ImageIcon,
+  Settings as SettingsIcon,
+  Sparkles,
+  ExternalLink,
 } from 'lucide-react';
 import type { Book } from '../types';
 import { BookCover } from './BookCover';
 import { lookupByIsbn, lookupFromScan, searchBooks, BookLookupError } from '../lib/books';
 import { cleanIsbn, containsHebrew, isValidIsbn } from '../lib/isbn';
+import { getCachedBarcode, setCachedBarcode } from '../lib/cache';
+import { loadSettings, saveSettings } from '../lib/storage';
 import { t, type Lang } from '../lib/i18n';
 
 interface ScannerProps {
@@ -28,9 +34,11 @@ type State =
   | { kind: 'idle' }
   | { kind: 'scanning' }
   | { kind: 'looking-up'; payload: string }
-  | { kind: 'success'; book: Book }
+  | { kind: 'success'; book: Book; fromCache?: boolean }
   | { kind: 'error'; message: string }
-  | { kind: 'search'; payload?: string };
+  | { kind: 'search'; payload?: string }
+  | { kind: 'cover-camera' }
+  | { kind: 'cover-ocr'; progress: number; phase: string };
 
 interface ZoomCap {
   min: number;
@@ -40,6 +48,7 @@ interface ZoomCap {
 }
 
 const SCANNER_ID = 'qr-reader';
+const COVER_VIDEO_ID = 'cover-camera';
 
 export function Scanner({ lang, onBook }: ScannerProps) {
   const [state, setState] = useState<State>({ kind: 'idle' });
@@ -49,7 +58,13 @@ export function Scanner({ lang, onBook }: ScannerProps) {
   const [searching, setSearching] = useState(false);
   const [zoom, setZoom] = useState<ZoomCap | null>(null);
 
+  // The barcode payload that should be cached when the user picks a search result,
+  // so a subsequent scan of the same publisher SKU auto-resolves.
+  const pendingCacheBarcodeRef = useRef<string | null>(null);
+
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const coverStreamRef = useRef<MediaStream | null>(null);
+  const coverVideoRef = useRef<HTMLVideoElement | null>(null);
   const lookupAbortRef = useRef<AbortController | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const handledPayloadRef = useRef<string | null>(null);
@@ -68,11 +83,16 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     }
   }, []);
 
-  const openSearch = useCallback((payload?: string) => {
+  const stopCoverCamera = useCallback(() => {
+    coverStreamRef.current?.getTracks().forEach((t) => t.stop());
+    coverStreamRef.current = null;
+    if (coverVideoRef.current) coverVideoRef.current.srcObject = null;
+  }, []);
+
+  const openSearch = useCallback((payload?: string, cacheable?: string) => {
     setSearchResults([]);
-    // Pre-fill the search box only if the failed payload has letters — pure numeric
-    // codes (barcodes) make terrible search queries.
     setSearchQuery(payload && /[A-Za-z֐-׿]/.test(payload) ? payload : '');
+    pendingCacheBarcodeRef.current = cacheable ?? null;
     setState({ kind: 'search', payload });
   }, []);
 
@@ -80,6 +100,17 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     async (payload: string) => {
       if (handledPayloadRef.current === payload) return;
       handledPayloadRef.current = payload;
+
+      // Fast path: user already matched this barcode in a previous scan.
+      const cached = getCachedBarcode(payload);
+      if (cached) {
+        lookupAbortRef.current?.abort();
+        await stopCamera();
+        onBook({ ...cached, addedAt: new Date().toISOString(), source: 'qr' });
+        setState({ kind: 'success', book: cached, fromCache: true });
+        return;
+      }
+
       lookupAbortRef.current?.abort();
       const ac = new AbortController();
       lookupAbortRef.current = ac;
@@ -94,7 +125,7 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         if (err.name === 'AbortError') return;
         const code = (err as BookLookupError).code;
         if (code === 'not-found') {
-          openSearch(payload);
+          openSearch(payload, payload);
           return;
         }
         setState({
@@ -126,7 +157,6 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     handledPayloadRef.current = null;
     setState({ kind: 'scanning' });
 
-    // Browsers require a secure context (HTTPS or localhost) for getUserMedia.
     if (typeof window !== 'undefined' && !window.isSecureContext) {
       setState({ kind: 'error', message: t(lang, 'scan.error.https') });
       return;
@@ -143,15 +173,10 @@ export function Scanner({ lang, onBook }: ScannerProps) {
           Html5QrcodeSupportedFormats.CODE_128,
         ],
         verbose: false,
-        // Native BarcodeDetector on Chromium-based browsers — drastically better
-        // decode rate and works alongside the camera's own autofocus pipeline.
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
       });
       scannerRef.current = instance;
 
-      // Request continuous autofocus via advanced MediaTrackConstraints.
-      // Android Chrome/Firefox honour this; iOS Safari ignores it but already
-      // does continuous AF by default.
       const cameraConfig = {
         facingMode: { ideal: 'environment' },
         advanced: [{ focusMode: 'continuous' }],
@@ -162,7 +187,6 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         cameraConfig,
         {
           fps: 15,
-          // Wider, shorter viewfinder optimised for 1D barcodes rather than QR squares.
           qrbox: (vw, vh) => {
             const w = Math.floor(Math.min(vw, vh) * 0.85);
             const h = Math.max(110, Math.floor(w * 0.55));
@@ -174,11 +198,10 @@ export function Scanner({ lang, onBook }: ScannerProps) {
           void handlePayload(decoded);
         },
         () => {
-          // ignore per-frame decode failures — they fire constantly
+          // ignore per-frame decode failures
         },
       );
 
-      // Re-apply autofocus after start; some browsers only honour it on a live track.
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (instance as any).applyVideoConstraints({
@@ -188,8 +211,6 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         // unsupported — fine
       }
 
-      // Detect zoom capability and expose a slider so the user can frame the barcode
-      // tightly without crossing the lens minimum focus distance.
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const caps = (instance as any).getRunningTrackCameraCapabilities?.();
@@ -213,13 +234,118 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     }
   }, [handlePayload, lang]);
 
+  const startCoverCamera = useCallback(async () => {
+    setState({ kind: 'cover-camera' });
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      setState({ kind: 'error', message: t(lang, 'scan.error.https') });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          advanced: [{ focusMode: 'continuous' }] as any,
+        },
+        audio: false,
+      });
+      coverStreamRef.current = stream;
+      const attempt = () => {
+        const v = coverVideoRef.current;
+        if (!v) {
+          setTimeout(attempt, 30);
+          return;
+        }
+        v.srcObject = stream;
+        void v.play();
+      };
+      attempt();
+    } catch (e) {
+      const err = e as Error;
+      const msg = /permission|denied|NotAllowed/i.test(err.message)
+        ? t(lang, 'scan.error.camera')
+        : err.message || t(lang, 'scan.error.camera');
+      setState({ kind: 'error', message: msg });
+    }
+  }, [lang]);
+
+  const runSearch = useCallback(async (q: string) => {
+    if (!q.trim()) return;
+    searchAbortRef.current?.abort();
+    const ac = new AbortController();
+    searchAbortRef.current = ac;
+    setSearching(true);
+    try {
+      const results = await searchBooks(q, {
+        lang: containsHebrew(q) ? 'he' : undefined,
+        signal: ac.signal,
+      });
+      setSearchResults(results);
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const captureCover = useCallback(async () => {
+    const video = coverVideoRef.current;
+    if (!video || video.readyState < 2) return;
+    // Lazy-load OCR module (and tesseract.js) only when actually needed.
+    const ocr = await import('../lib/ocr');
+    const canvas = ocr.snapshotVideo(video);
+    stopCoverCamera();
+    setState({ kind: 'cover-ocr', progress: 0, phase: 'init' });
+    try {
+      const candidates = await ocr.ocrTitleCandidates(canvas, (p) => {
+        setState((prev) =>
+          prev.kind === 'cover-ocr' ? { kind: 'cover-ocr', progress: p.progress, phase: p.status } : prev,
+        );
+      });
+      if (candidates.length === 0) {
+        openSearch();
+        setSearchQuery('');
+        setSearchResults([]);
+        setState({ kind: 'search', payload: undefined });
+        // Soft error inline:
+        setSearching(false);
+        setSearchResults([]);
+        return;
+      }
+      // Search with the strongest candidate; if empty, union the next ones.
+      let results: Book[] = [];
+      for (const q of candidates) {
+        searchAbortRef.current?.abort();
+        const ac = new AbortController();
+        searchAbortRef.current = ac;
+        const r = await searchBooks(q, {
+          lang: containsHebrew(q) ? 'he' : undefined,
+          signal: ac.signal,
+        });
+        results = mergeResults(results, r);
+        if (results.length >= 5) break;
+      }
+      setSearchQuery(candidates[0]);
+      setSearchResults(results);
+      setState({ kind: 'search', payload: pendingCacheBarcodeRef.current ?? undefined });
+    } catch (e) {
+      setState({
+        kind: 'error',
+        message: (e as Error).message || t(lang, 'scan.cover.notext'),
+      });
+    }
+  }, [lang, openSearch, stopCoverCamera]);
+
   useEffect(() => {
     return () => {
       void stopCamera();
+      stopCoverCamera();
       lookupAbortRef.current?.abort();
       searchAbortRef.current?.abort();
     };
-  }, [stopCamera]);
+  }, [stopCamera, stopCoverCamera]);
 
   const handleManualSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -247,35 +373,23 @@ export function Scanner({ lang, onBook }: ScannerProps) {
     [lang, manualIsbn, onBook, openSearch],
   );
 
-  const runSearch = useCallback(async (q: string) => {
-    if (!q.trim()) return;
-    searchAbortRef.current?.abort();
-    const ac = new AbortController();
-    searchAbortRef.current = ac;
-    setSearching(true);
-    try {
-      const results = await searchBooks(q, {
-        lang: containsHebrew(q) ? 'he' : undefined,
-        signal: ac.signal,
-      });
-      setSearchResults(results);
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') setSearchResults([]);
-    } finally {
-      setSearching(false);
-    }
-  }, []);
-
   const reset = useCallback(() => {
+    pendingCacheBarcodeRef.current = null;
+    stopCoverCamera();
     setState({ kind: 'idle' });
     setSearchQuery('');
     setSearchResults([]);
-  }, []);
+  }, [stopCoverCamera]);
 
   const onPickResult = useCallback(
     (book: Book) => {
+      const cacheBarcode = pendingCacheBarcodeRef.current;
       const tagged: Book = { ...book, source: 'manual' };
       onBook(tagged);
+      if (cacheBarcode) {
+        setCachedBarcode(cacheBarcode, tagged);
+        pendingCacheBarcodeRef.current = null;
+      }
       setState({ kind: 'success', book: tagged });
     },
     [onBook],
@@ -288,7 +402,33 @@ export function Scanner({ lang, onBook }: ScannerProps) {
         <p className="mt-1 text-sm text-slate-400">{t(lang, 'scan.subtitle')}</p>
       </header>
 
-      {state.kind === 'search' ? (
+      {state.kind === 'cover-camera' && (
+        <CoverCameraView
+          lang={lang}
+          videoRef={coverVideoRef}
+          onCapture={() => void captureCover()}
+          onCancel={() => {
+            stopCoverCamera();
+            reset();
+          }}
+        />
+      )}
+
+      {state.kind === 'cover-ocr' && (
+        <div className="card flex flex-col items-center gap-3 py-8 text-center animate-fade-in">
+          <Sparkles className="h-10 w-10 animate-pulse text-accent-400" />
+          <p className="text-sm font-medium text-white">{t(lang, 'scan.cover.processing')}</p>
+          <p className="text-xs uppercase tracking-wider text-slate-500">{state.phase}</p>
+          <div className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full bg-gradient-to-r from-accent-500 to-indigo-500 transition-[width]"
+              style={{ width: `${Math.max(5, Math.round(state.progress * 100))}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {state.kind === 'search' && (
         <SearchFallback
           lang={lang}
           payload={state.payload}
@@ -299,8 +439,15 @@ export function Scanner({ lang, onBook }: ScannerProps) {
           onSubmit={() => void runSearch(searchQuery)}
           onPick={onPickResult}
           onCancel={reset}
+          onCoverScan={() => void startCoverCamera()}
         />
-      ) : (
+      )}
+
+      {(state.kind === 'idle' ||
+        state.kind === 'scanning' ||
+        state.kind === 'looking-up' ||
+        state.kind === 'success' ||
+        state.kind === 'error') && (
         <>
           <div className="card relative overflow-hidden">
             <div
@@ -331,7 +478,10 @@ export function Scanner({ lang, onBook }: ScannerProps) {
                       aria-label={t(lang, 'scan.zoom')}
                       dir="ltr"
                     />
-                    <span className="w-10 text-end text-xs font-medium text-white/90 tabular-nums" dir="ltr">
+                    <span
+                      className="w-10 text-end text-xs font-medium text-white/90 tabular-nums"
+                      dir="ltr"
+                    >
                       {zoom.current.toFixed(1)}×
                     </span>
                   </div>
@@ -357,6 +507,11 @@ export function Scanner({ lang, onBook }: ScannerProps) {
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-emerald-950/85 backdrop-blur p-6 text-center">
                 <CheckCircle2 className="h-12 w-12 text-emerald-400" />
                 <p className="text-lg font-semibold text-white">{t(lang, 'scan.added')}</p>
+                {state.fromCache && (
+                  <p className="text-[11px] uppercase tracking-wider text-emerald-300">
+                    {t(lang, 'scan.cache.hit')}
+                  </p>
+                )}
                 <p className="line-clamp-2 text-sm text-emerald-200">{state.book.title}</p>
                 <button onClick={reset} className="btn-ghost mt-2">
                   <ScanLine className="h-4 w-4" /> {t(lang, 'scan.start')}
@@ -367,7 +522,10 @@ export function Scanner({ lang, onBook }: ScannerProps) {
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-rose-950/85 backdrop-blur p-6 text-center">
                 <AlertCircle className="h-12 w-12 text-rose-400" />
                 <p className="text-sm font-medium text-rose-100">{state.message}</p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap justify-center gap-2">
+                  <button onClick={() => void startCoverCamera()} className="btn-ghost">
+                    <ImageIcon className="h-4 w-4" /> {t(lang, 'scan.cover.cta')}
+                  </button>
                   <button onClick={() => openSearch()} className="btn-ghost">
                     <Search className="h-4 w-4" /> {t(lang, 'scan.search.byTitle')}
                   </button>
@@ -391,7 +549,20 @@ export function Scanner({ lang, onBook }: ScannerProps) {
                   <Camera className="h-5 w-5" />
                   {t(lang, 'scan.start')}
                 </button>
-                <button onClick={() => openSearch()} className="btn-ghost px-4" aria-label={t(lang, 'scan.search.byTitle')}>
+                <button
+                  onClick={() => void startCoverCamera()}
+                  className="btn-ghost px-4"
+                  aria-label={t(lang, 'scan.cover.cta')}
+                  title={t(lang, 'scan.cover.cta')}
+                >
+                  <ImageIcon className="h-5 w-5" />
+                </button>
+                <button
+                  onClick={() => openSearch()}
+                  className="btn-ghost px-4"
+                  aria-label={t(lang, 'scan.search.byTitle')}
+                  title={t(lang, 'scan.search.byTitle')}
+                >
                   <Search className="h-5 w-5" />
                 </button>
               </>
@@ -419,8 +590,61 @@ export function Scanner({ lang, onBook }: ScannerProps) {
               </button>
             </form>
           </div>
+
+          <SettingsPanel lang={lang} />
         </>
       )}
+    </div>
+  );
+}
+
+function mergeResults(a: Book[], b: Book[]): Book[] {
+  const seen = new Set(a.map((x) => x.id));
+  const out = [...a];
+  for (const item of b) {
+    if (!seen.has(item.id)) {
+      out.push(item);
+      seen.add(item.id);
+    }
+  }
+  return out;
+}
+
+interface CoverCameraProps {
+  lang: Lang;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  onCapture: () => void;
+  onCancel: () => void;
+}
+
+function CoverCameraView({ lang, videoRef, onCapture, onCancel }: CoverCameraProps) {
+  return (
+    <div className="card relative overflow-hidden animate-fade-in">
+      <video
+        id={COVER_VIDEO_ID}
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="aspect-[3/4] w-full rounded-2xl bg-black/80 object-cover"
+      />
+      <div className="pointer-events-none absolute inset-x-0 top-3 mx-auto w-max max-w-[90%] rounded-full bg-black/55 px-3 py-1 text-xs font-medium text-white backdrop-blur">
+        <ImageIcon className="me-1.5 inline h-3.5 w-3.5" />
+        {t(lang, 'scan.cover.hint')}
+      </div>
+      <div className="absolute inset-x-0 bottom-3 flex items-center justify-center gap-3">
+        <button onClick={onCancel} className="btn-ghost px-4" aria-label={t(lang, 'common.close')}>
+          <X className="h-5 w-5" />
+        </button>
+        <button
+          onClick={onCapture}
+          className="grid h-16 w-16 place-items-center rounded-full bg-white shadow-2xl shadow-black/50 ring-4 ring-white/30 active:scale-95"
+          aria-label={t(lang, 'scan.cover.capture')}
+        >
+          <span className="block h-12 w-12 rounded-full bg-gradient-to-br from-accent-500 to-indigo-600" />
+        </button>
+        <div className="w-12" />
+      </div>
     </div>
   );
 }
@@ -435,6 +659,7 @@ interface SearchFallbackProps {
   onSubmit: () => void;
   onPick: (b: Book) => void;
   onCancel: () => void;
+  onCoverScan: () => void;
 }
 
 function SearchFallback({
@@ -447,6 +672,7 @@ function SearchFallback({
   onSubmit,
   onPick,
   onCancel,
+  onCoverScan,
 }: SearchFallbackProps) {
   return (
     <div className="card flex flex-col gap-3 animate-fade-in">
@@ -463,6 +689,20 @@ function SearchFallback({
             {t(lang, 'scan.fallback.hint')}
           </p>
         </div>
+      </div>
+
+      <button
+        onClick={onCoverScan}
+        className="flex items-center justify-center gap-2 rounded-2xl bg-gradient-to-br from-accent-500/15 to-indigo-500/15 px-4 py-3 text-sm font-medium text-accent-200 ring-1 ring-accent-400/30 transition hover:bg-accent-500/20 active:scale-[0.99]"
+      >
+        <ImageIcon className="h-4 w-4" />
+        {t(lang, 'scan.cover.cta')}
+      </button>
+
+      <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-slate-500">
+        <span className="h-px flex-1 bg-white/10" />
+        OR
+        <span className="h-px flex-1 bg-white/10" />
       </div>
 
       <form
@@ -536,6 +776,68 @@ function SearchFallback({
       <button onClick={onCancel} className="btn-ghost mt-1">
         <X className="h-4 w-4" /> {t(lang, 'scan.tryAgain')}
       </button>
+    </div>
+  );
+}
+
+function SettingsPanel({ lang }: { lang: Lang }) {
+  const [open, setOpen] = useState(false);
+  const [key, setKey] = useState(() => loadSettings().nliApiKey ?? '');
+  const [savedAt, setSavedAt] = useState(0);
+
+  const save = () => {
+    const trimmed = key.trim();
+    const s = loadSettings();
+    saveSettings({ ...s, nliApiKey: trimmed || undefined });
+    setSavedAt(Date.now());
+  };
+
+  return (
+    <div className="card">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between text-sm font-medium text-slate-300"
+      >
+        <span className="flex items-center gap-2">
+          <SettingsIcon className="h-4 w-4" />
+          {t(lang, 'settings.title')}
+        </span>
+        <span className="text-xs text-slate-500">{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-2">
+          <label className="text-xs font-medium text-slate-300">
+            {t(lang, 'settings.nli.label')}
+          </label>
+          <p className="text-[11px] leading-relaxed text-slate-500">
+            {t(lang, 'settings.nli.hint')}{' '}
+            <a
+              href="https://api2.nli.org.il/signup/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent-300 underline-offset-2 hover:underline"
+            >
+              {t(lang, 'settings.nli.signup')} <ExternalLink className="inline h-3 w-3" />
+            </a>
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder={t(lang, 'settings.nli.placeholder')}
+              className="flex-1 rounded-2xl bg-white/5 px-3 py-2 text-sm text-white ring-1 ring-inset ring-white/10 placeholder:text-slate-500 focus:outline-none focus:ring-accent-500"
+              dir="ltr"
+              autoComplete="off"
+            />
+            <button onClick={save} className="btn-primary px-4 text-xs">
+              {savedAt && Date.now() - savedAt < 2000
+                ? t(lang, 'settings.saved')
+                : t(lang, 'settings.save')}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
