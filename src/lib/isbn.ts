@@ -14,7 +14,10 @@ export function isValidIsbn10(s: string): boolean {
 }
 
 export function isValidIsbn13(s: string): boolean {
-  if (!/^\d{13}$/.test(s)) return false;
+  // Real ISBN-13s always start with 978 or 979 (Bookland EAN). Without that
+  // guard, every valid EAN-13 product code (e.g. Israeli publisher SKUs printed
+  // on book backs) would pass checksum and lead to dead-end lookups.
+  if (!/^97[89]\d{10}$/.test(s)) return false;
   let sum = 0;
   for (let i = 0; i < 13; i++) {
     const d = Number(s[i]);
@@ -38,18 +41,19 @@ export function isIsraeliIsbn(s: string): boolean {
 
 /**
  * Extract any ISBN-like string from a free-form QR payload.
- * Books sometimes encode ISBNs directly, sometimes as URLs containing the ISBN.
+ * Slides a window across the digits so that a valid ISBN substring is found even
+ * if the payload includes a URL, a leading UPC-A zero, or surrounding noise.
  */
 export function extractIsbn(payload: string): string | null {
-  // Direct match: 10 or 13 digits, possibly with X for ISBN-10
-  const direct = payload.match(/(?:97[89])?\d{9}[\dX]/i);
-  if (direct) {
-    const candidate = cleanIsbn(direct[0]);
-    if (isValidIsbn(candidate)) return candidate;
+  const digits = payload.replace(/[^0-9Xx]/g, '').toUpperCase();
+  for (let i = 0; i + 13 <= digits.length; i++) {
+    const w = digits.slice(i, i + 13);
+    if (isValidIsbn13(w)) return w;
   }
-  // Try a stripped version
-  const stripped = cleanIsbn(payload);
-  if (isValidIsbn(stripped)) return stripped;
+  for (let i = 0; i + 10 <= digits.length; i++) {
+    const w = digits.slice(i, i + 10);
+    if (isValidIsbn10(w)) return w;
+  }
   return null;
 }
 

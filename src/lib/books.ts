@@ -108,8 +108,13 @@ async function fetchGoogleByIsbn(isbn: string, signal?: AbortSignal): Promise<Bo
   return googleVolumeToBook(data.items[0], 'isbn');
 }
 
-async function fetchGoogleByQuery(q: string, signal?: AbortSignal): Promise<Book[]> {
-  const res = await fetch(`${GOOGLE}?q=${encodeURIComponent(q)}&maxResults=10`, { signal });
+async function fetchGoogleByQuery(
+  q: string,
+  opts: { lang?: string; signal?: AbortSignal } = {},
+): Promise<Book[]> {
+  const params = new URLSearchParams({ q, maxResults: '12' });
+  if (opts.lang) params.set('langRestrict', opts.lang);
+  const res = await fetch(`${GOOGLE}?${params.toString()}`, { signal: opts.signal });
   if (!res.ok) return [];
   const data = (await res.json()) as { items?: GoogleVolume[] };
   return (data.items ?? []).map((v) => googleVolumeToBook(v, 'manual'));
@@ -204,12 +209,18 @@ export async function lookupFromScan(payload: string, signal?: AbortSignal): Pro
     // not a URL
   }
   // Last resort: search Google Books with the raw payload (e.g. QR contains book title)
-  const results = await fetchGoogleByQuery(payload, signal);
+  const results = await fetchGoogleByQuery(payload, { signal });
   if (results.length) return { ...results[0], source: 'qr' };
   throw new BookLookupError('Could not resolve scanned code', 'not-found');
 }
 
-export async function searchBooks(query: string, signal?: AbortSignal): Promise<Book[]> {
+export async function searchBooks(
+  query: string,
+  opts: { lang?: string; signal?: AbortSignal } = {},
+): Promise<Book[]> {
   if (!query.trim()) return [];
-  return fetchGoogleByQuery(query, signal);
+  // Auto-bias toward Hebrew metadata when the query itself contains Hebrew characters —
+  // produces noticeably better hits for Israeli book titles.
+  const lang = opts.lang ?? (containsHebrew(query) ? 'he' : undefined);
+  return fetchGoogleByQuery(query, { lang, signal: opts.signal });
 }
